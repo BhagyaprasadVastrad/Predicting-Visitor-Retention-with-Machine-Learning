@@ -37,7 +37,7 @@ This project presents a **machine learning approach to predicting and improving 
 
 ---
 
-## 🤖 Predictive Modelling
+## Predictive Modelling
 
 | Metric        | Decision Tree | Random Forest |
 |---------------|---------------|---------------|
