@@ -1,0 +1,811 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+# Load necessary libraries
+library(readr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(caret)
+library(ranger)
+library(caTools)
+library(rpart)
+library(tidyr)
+
+#  Load the dataset
+original_data <- read_csv("museum.csv")
+
+```
+# Data Cleaning And preprocessing
+```{r}
+df <- original_data
+
+# Clean column names (remove spaces)
+colnames(df) <- trimws(colnames(df))
+
+# Convert "N/A" strings to proper NA values
+df[df == "N/A"] <- NA
+
+# filling Na for NI visitors
+df <- df %>%
+  mutate(
+    `Purpose of Visit to NI` = ifelse(`Visitor home location` == "Northern Ireland" & is.na(`Purpose of Visit to NI`), "Local Resident", `Purpose of Visit to NI`),
+    
+    `Staying Overnight?` = ifelse(`Visitor home location` == "Northern Ireland" & is.na(`Staying Overnight?`), "No", `Staying Overnight?`)
+  )
+
+#random missing values
+df <- df %>%
+  mutate(
+    `Purpose of Visit to NI` = ifelse(is.na(`Purpose of Visit to NI`), "Unknown", `Purpose of Visit to NI`),
+    `Staying Overnight?` = ifelse(is.na(`Staying Overnight?`), "Unknown", `Staying Overnight?`)
+  )
+
+
+# Convert categorical variables to factors
+categorical_cols <- c("QUARTER", "Museum", "Was there any event?", 
+                      "Visitor home location", "Purpose of Visit to NI", 
+                      "Staying Overnight?","Are you aware that National Museums NI has a Membership scheme?", "Gender", "Visitor Parties", "Age Range")
+
+df[categorical_cols] <- lapply(df[categorical_cols], as.factor)
+
+# Convert necessary columns to numeric
+df$`Dwell Time` <- as.numeric(df$`Dwell Time`)
+df$`Net Promoter Score` <- as.numeric(df$`Net Promoter Score`)
+
+# Drop empty or unnecessary columns
+df$`What personal benefits have you gained as a result of visiting this museum?` <- NULL
+df$`Other Gender` <- NULL  # Drop since mostly missing
+
+# Fill missing dwell time using group median (grouped by Visit Frequency)
+df <- df %>%
+  group_by(`How often do you visit this museum?`) %>%
+  mutate(`Dwell Time` = ifelse(is.na(`Dwell Time`), median(`Dwell Time`, na.rm = TRUE), `Dwell Time`)) %>%
+  ungroup()  # Remove grouping after filling missing values
+
+#Convert "Year" to an Ordered Factor
+df$Year <- factor(df$Year, 
+                  levels = c(2022, 2023, 2024), 
+                  ordered = TRUE)  # Ordered factor
+
+# Convert survey responses to categorical factors
+survey_cols <- c("I have learned new things", "I have had an enjoyable experience", 
+                 "I have made good use of my free time", "I have nurtured an interest", 
+                 "I have interacted with others", "I have improved my health and wellbeing")
+
+for (col in survey_cols) {
+  df[[col]][is.na(df[[col]])] <- "No Response"  # Fill missing values
+  df[[col]] <- as.factor(df[[col]])  # Convert to factor
+}
+
+
+# Convert "Quarter" to ordinal
+df$QUARTER <- gsub("\\s*-\\s*", " to ", df$QUARTER)
+df$QUARTER <- trimws(df$QUARTER)
+
+df$QUARTER <- factor(df$QUARTER,
+                     levels = c("Q1 May to Jul 2022", "Q2 Aug to 23 Oct 2022", "Q3 Oct 29 to Dec 2022",
+                                "Q1 Apr to Jun 2023", "Q2 Aug to Sep 2023", "Q3 Oct to Dec 2023", "Q4 Jan to Mar 2023",
+                                "Q1 Apr to Jun 2024", "Q2 Jul to Sep 2024", "Q3 Oct to Dec 2024", "Q4 Jan to Mar 2024"),ordered = TRUE)
+
+
+# Convert "How often do you visit this museum?" to an ordered factor
+df$`How often do you visit this museum?` <- factor(df$`How often do you visit this museum?`, 
+                                                   levels = c("Today was my first time", 
+                                                              "Last visit was more than 5 years ago",
+                                                              "Last visit was 3-5 years ago",
+                                                              "Once every 1 to 2 years", 
+                                                              "Once or twice a year", 
+                                                              "Every 2-3 months", 
+                                                              "Monthly or more often"),
+                                                   ordered = TRUE)  # Ordered factor
+# convert net promoter score to ordinal
+df$`Net Promoter Score` <- factor(df$`Net Promoter Score`, 
+                                  levels = 0:10,  # Ensuring order from 0 to 10
+                                  ordered = TRUE) 
+
+
+#convert age range to ordinal
+df$`Age Range` <- factor(df$`Age Range`, 
+                         levels = c("18-24", "25-34", "35-44", "45-54", "55-64", "65+", "Declined"), 
+                         ordered = TRUE) 
+
+#convert MDM to ordinal
+df$`MDM - Quintiles`[is.na(df$`MDM - Quintiles`)] <- "Unknown"
+df$`MDM - Quintiles` <- factor(df$`MDM - Quintiles`, 
+                               levels = c("Q1 - Most Deprived", "Q2 - Deprived", "Q3 - Average", 
+                                          "Q4 - Less Deprived", "Q5 - Least Deprived", "Unknown"), 
+                               ordered = TRUE)
+
+
+```
+
+# Exploratory Data Analysis
+```{r}
+df <- df %>%
+  mutate(visit_label = case_when(
+    `How often do you visit this museum?` == "Every 2-3 months" ~ "2-3 months",
+    `How often do you visit this museum?` == "Last visit was 3-5 years ago" ~ "3-5 years ago",
+    `How often do you visit this museum?` == "Last visit was more than 5 years ago" ~ ">5 years",
+    `How often do you visit this museum?` == "Today was my first time" ~ "First time",
+    TRUE ~ as.character(`How often do you visit this museum?`)
+  ),
+  museum_label = gsub(" Museum$", "", as.character(Museum))
+  )
+
+# 1. Visitor Frequency Across Different Museums
+p1 <- ggplot(df, aes(x = visit_label, fill = museum_label)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~museum_label) +
+  theme_minimal() +
+  labs(
+    title = "Visitor Frequency Across Different Museums",
+    x = "Visitor Frequency",
+    y = "Count",
+    fill = "Museum"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.margin = unit(c(1, 1, 1, 1), "cm")
+  )
+
+# 2. Visitor Frequency by Age Group
+p2 <- df %>%
+  filter(`Age Range` != "Declined") %>%
+  ggplot(aes(x = visit_label, fill = `Age Range`)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~`Age Range`, ncol = 2) +
+  theme_minimal() +
+  labs(
+    title = "Visitor Frequency by Age Group (Excl. Declined)",
+    x = "Visitor Frequency",
+    y = "Count",
+    fill = "Age Range"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.margin = unit(c(1, 1, 1, 1), "cm")
+  )
+
+# 3. Visitor Frequency by Party Type
+p3 <- ggplot(df, aes(x = visit_label, fill = `Visitor Parties`)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~`Visitor Parties`) +
+  theme_minimal() +
+  labs(
+    title = "Visitor Frequency by Party Type",
+    x = "Visitor Frequency",
+    y = "Count",
+    fill = "Visitor Party"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.margin = unit(c(1, 1, 1, 1), "cm")
+  )
+
+# 4. Visitor Frequency Based on Event Presence
+p4 <- ggplot(df, aes(x = visit_label, fill = `Was there any event?`)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~`Was there any event?`) +
+  theme_minimal() +
+  labs(
+    title = "Visitor Frequency Based on Event Presence",
+    x = "Visitor Frequency",
+    y = "Count",
+    fill = "Event Presence"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.margin = unit(c(1, 1, 1, 1), "cm")
+  )
+
+# Print all
+p1
+p2
+p3
+p4
+```
+
+```{r}
+
+df %>%
+  filter(`Visitor home location` != "Declined") %>%
+  mutate(visit_label = case_when(
+    `How often do you visit this museum?` == "Every 2-3 months" ~ "2-3 months",
+    `How often do you visit this museum?` == "Last visit was 3-5 years ago" ~ "3-5 years ago",
+    `How often do you visit this museum?` == "Last visit was more than 5 years ago" ~ ">5 years ago",
+    `How often do you visit this museum?` == "Today was my first time" ~ "First time",
+    TRUE ~ as.character(`How often do you visit this museum?`)
+  )) %>%
+  ggplot(aes(x = visit_label, fill = `Visitor home location`)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~ `Museum`) +
+  theme_minimal() +
+  labs(
+    title = "Visitor Frequency by Home Location & Museum Type", 
+    x = "Visitor Frequency", 
+    y = "Count", 
+    fill = "Home Location"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+df %>%
+  filter(`Age Range` != "Declined") %>%
+  mutate(age_label = as.character(`Age Range`)) %>%
+  ggplot(aes(x = age_label, fill = age_label)) +
+  geom_bar() +
+  facet_wrap(~`Visitor Parties`) +
+  theme_minimal() +
+  labs(
+    title = "Count of Visitors by Age Group & Visitor Party",
+    x = "Age Group",
+    y = "Count"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+
+df %>%
+  mutate(party_label = as.character(`Visitor Parties`),
+         event_label = as.character(`Was there any event?`)) %>%
+  ggplot(aes(x = party_label, y = `Dwell Time`, fill = event_label)) +
+  geom_bar(stat = "summary", fun = "mean", position = "dodge") +
+  facet_wrap(~ event_label) +
+  theme_minimal() +
+  labs(
+    title = "Average Dwell Time by Visitor Party & Event Presence",
+    x = "Visitor Party",
+    y = "Average Dwell Time (minutes)",
+    fill = "Event Presence"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+```{r}
+nps_faceted_df <- bind_rows(
+
+  # Visitor Frequency
+  df %>%
+    mutate(label = case_when(
+      `How often do you visit this museum?` == "Every 2-3 months" ~ "2-3 months",
+      `How often do you visit this museum?` == "Last visit was 3-5 years ago" ~ "3-5 years ago",
+      `How often do you visit this museum?` == "Last visit was more than 5 years ago" ~ ">5 years",
+      `How often do you visit this museum?` == "Today was my first time" ~ "First time",
+      TRUE ~ as.character(`How often do you visit this museum?`)
+    )) %>%
+    group_by(group = label) %>%
+    summarise(mean_nps = mean(as.numeric(as.character(`Net Promoter Score`)), na.rm = TRUE)) %>%
+    mutate(variable = "Visitor Frequency"),
+
+  # Age Group (as-is)
+  df %>%
+    group_by(group = as.character(`Age Range`)) %>%
+    summarise(mean_nps = mean(as.numeric(as.character(`Net Promoter Score`)), na.rm = TRUE)) %>%
+    mutate(variable = "Age Group"),
+
+  # Museum (cleaned)
+  df %>%
+    mutate(label = gsub(" Museum$", "", as.character(Museum))) %>%
+    group_by(group = label) %>%
+    summarise(mean_nps = mean(as.numeric(as.character(`Net Promoter Score`)), na.rm = TRUE)) %>%
+    mutate(variable = "Museum"),
+
+  # Visitor Party Type (as-is)
+  df %>%
+    group_by(group = as.character(`Visitor Parties`)) %>%
+    summarise(mean_nps = mean(as.numeric(as.character(`Net Promoter Score`)), na.rm = TRUE)) %>%
+    mutate(variable = "Visitor Party Type")
+)
+
+# Plot
+ggplot(nps_faceted_df, aes(x = group, y = mean_nps, fill = group)) +
+  geom_bar(stat = "identity") +
+
+  facet_wrap(~variable, scales = "free", ncol = 2) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Average Net Promoter Score Across Visitor Segments",
+    x = NULL,
+    y = "Average NPS"
+  ) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold", size = 14),
+    axis.text.y = element_text(size = 11),
+    axis.text.x = element_text(size = 11),
+    plot.margin = unit(c(1, 1, 1, 1), "cm")
+  )# output might seem a little clumpsy try to view it through show in new window icon
+
+```
+
+
+```{r}
+library(grid)  # for plot.margin
+
+dwell_faceted_df <- bind_rows(
+
+  # Visitor Frequency (custom labels)
+  df %>%
+    mutate(label = case_when(
+      `How often do you visit this museum?` == "Every 2-3 months" ~ "2-3 months",
+      `How often do you visit this museum?` == "Last visit was 3-5 years ago" ~ "3-5 years ago",
+      `How often do you visit this museum?` == "Last visit was more than 5 years ago" ~ ">5 years",
+      `How often do you visit this museum?` == "Today was my first time" ~ "First time",
+      TRUE ~ as.character(`How often do you visit this museum?`)
+    )) %>%
+    group_by(group = label) %>%
+    summarise(mean_dwell = mean(`Dwell Time`, na.rm = TRUE)) %>%
+    mutate(variable = "Visitor Frequency"),
+  
+  # Museum Type (remove 'Museum')
+  df %>%
+    mutate(label = gsub(" Museum$", "", as.character(Museum))) %>%
+    group_by(group = label) %>%
+    summarise(mean_dwell = mean(`Dwell Time`, na.rm = TRUE)) %>%
+    mutate(variable = "Museum Type"),
+
+  # Event Presence
+  df %>%
+    group_by(group = as.character(`Was there any event?`)) %>%
+    summarise(mean_dwell = mean(`Dwell Time`, na.rm = TRUE)) %>%
+    mutate(variable = "Event Presence"),
+
+  # Age Group
+  df %>%
+    group_by(group = as.character(`Age Range`)) %>%
+    summarise(mean_dwell = mean(`Dwell Time`, na.rm = TRUE)) %>%
+    mutate(variable = "Age Group"),
+
+  # Visitor Party Type
+  df %>%
+    group_by(group = as.character(`Visitor Parties`)) %>%
+    summarise(mean_dwell = mean(`Dwell Time`, na.rm = TRUE)) %>%
+    mutate(variable = "Visitor Party Type")
+)
+
+# Final Plot
+ggplot(dwell_faceted_df, aes(x = group, y = mean_dwell, fill = group)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ variable, scales = "free_x", ncol = 2) +
+  labs(
+    title = "Average Dwell Time by Visitor Segments",
+    x = "", 
+    y = "Average Dwell Time (minutes)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none",
+    plot.margin = unit(c(1, 1, 1, 1), "cm"),
+    strip.text = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 11)
+  )# output might seem a little clumpsy try to view it through show in new window icon
+```
+
+# Hypothesis Testing
+
+```{r}
+# 1. Do event attendees stay longer than non-attendees? (t-test)
+# H₀ (Null Hypothesis): There is no significant difference in dwell time between visitors who attended an event and those who didn’t.
+# H₁ (Alternative Hypothesis): Visitors who attended an event stay significantly longer than those who didn’t.
+
+# Conduct t-test
+
+t.test(df$`Dwell Time` ~ df$`Was there any event?`, var.equal = FALSE)
+
+```
+
+```{r}
+# 2. Does visitor satisfaction (NPS) vary across museum types? (ANOVA)
+# H₀: There is no significant difference in NPS across different museums.
+# H₁: At least one museum has a significantly different NPS.
+
+# Conduct ANOVA test
+anova_df <- df
+anova_df$`Net Promoter Score` <- as.numeric(as.character(anova_df$`Net Promoter Score`))
+
+anova_nps_museum <- aov(`Net Promoter Score` ~ Museum, data = anova_df)
+summary(anova_nps_museum)
+
+TukeyHSD(anova_nps_museum)
+```
+```{r}
+# 3.Does visitor satisfaction (NPS) differ across age groups? (ANOVA)
+# H₀: There is no significant difference in NPS across different age groups.
+# H₁: At least one age group has a significantly different NPS.
+
+anova_nps_age <- aov(anova_df$`Net Promoter Score` ~ anova_df$`Age Range`)
+summary(anova_nps_age)
+
+TukeyHSD(anova_nps_age)
+```
+```{r}
+# 4.Do different visitor groups (families, couples, lone visitors) spend different amounts of time? (ANOVA)
+# H₀: There is no significant difference in dwell time across different visitor groups.
+# H₁: At least one visitor group has a significantly different dwell time.
+
+# Conduct ANOVA test
+anova_dwell_party <- aov(df$`Dwell Time` ~ df$`Visitor Parties`)
+summary(anova_dwell_party)
+
+TukeyHSD(anova_dwell_party)
+```
+# Model Building 
+
+```{r}
+
+set.seed(123)  # For reproducibility
+
+df$Retention <- NULL
+
+returning_categories <- c(
+  "Monthly or more often", 
+  "Every 2-3 months", 
+  "Once or twice a year", 
+  "Once every 1 to 2 years"
+)
+
+# Assign Retention: 1 for Returning Visitors, 0 for Not Returning
+df$Retention <- ifelse(df$`How often do you visit this museum?` %in% returning_categories, "Returning", "Not_Returning")
+
+# Define the target variable (Visitor Retention: 1 = Returning, 0 = Not Returning)
+df$Retention <- as.factor(df$Retention) # Ensure classification
+
+# Select only relevant predictor variables
+selected_features <- c( "QUARTER","Museum","Dwell Time", "Net Promoter Score","Visitor Parties", "Age Range","Visitor home location","Are you aware that National Museums NI has a Membership scheme?","Purpose of Visit to NI","Staying Overnight?","I have learned new things","MDM - Quintiles")
+
+
+df_selected <- df[, c(selected_features, "Retention")]
+
+# Split data into training and testing sets (80-20 split)
+set.seed(123)
+in_train <- createDataPartition(df_selected$Retention, p = 0.80, list = FALSE)
+data_train <- df_selected[in_train,]
+data_test  <- df_selected[-in_train, ]
+
+# Check class distribution
+prop.table(table(df_selected$Retention))
+prop.table(table(data_train$Retention))
+prop.table(table(data_test$Retention))
+```
+
+```{r}
+set.seed(123)
+# Define predictor and response variables
+data_x <- as.data.frame(data_train[, -ncol(data_train)]) 
+data_y <- as.factor(data_train$Retention) 
+
+# Create 5-fold cross-validation indexes
+myFolds <- createFolds(data_y, k = 10, returnTrain = TRUE)
+
+# Configure training control
+ctrl <- trainControl(
+  method = "cv", # Used for configuring resampling method: in this case cross validation 
+  number = 10, # Instruct that it is 5 fold-cv
+  index = myFolds, # Folds' indexes
+  verboseIter = TRUE, # Print output of each step
+  savePredictions = TRUE, 
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary)
+
+# Train Decision Tree Model
+model_dt_auto <- train(
+  x = data_x, 
+  y = data_y, 
+  method = "rpart", 
+  trControl = ctrl,
+  tuneLength = 20, 
+  preProcess = c("zv", "center", "scale")
+)
+
+# Train Decision Tree Model with PCA
+model_dt_auto_pca <- train(
+  x = data_x, 
+  y = data_y, 
+  method = "rpart", 
+  trControl = ctrl, 
+  tuneLength = 20, 
+  preProcess = c("zv", "center", "scale", "pca")  
+)
+
+tune_grid <- expand.grid(
+  mtry = 4 , # Based on sqrt(7)
+  splitrule = c("gini"),  # Test both
+  min.node.size = 20 # Avoid extreme overfitting
+)
+
+# Train Random Forest Model (ranger)
+model_ranger_auto <- train(
+  x = data_x, 
+  y = data_y, 
+  method = "ranger", 
+  trControl = ctrl, 
+  tuneGrid = tune_grid, 
+  metric = "ROC",  # use ROC for selecting the best model
+  importance = "impurity",
+  num.trees = 500,
+  preProcess = c("zv", "center", "scale")
+)
+
+# Compare models
+all_resamples <- resamples(
+  list(
+    dt_auto = model_dt_auto,
+    dt_auto_pca = model_dt_auto_pca,
+    ranger_auto = model_ranger_auto
+  )
+)
+
+print(model_ranger_auto)
+# Visualize model comparison
+dotplot(all_resamples)
+```
+
+```{r}
+# Plot variable importance
+plot(varImp(model_ranger_auto))
+
+# Make predictions on the test set
+predictions <- predict(model_ranger_auto, newdata = data_test %>% select(-Retention)) 
+
+# Evaluate model performance
+confusionMatrix(predictions, reference = data_test$Retention, positive = "Returning")
+
+
+# Plot ROC curve
+ranger_class_probs <- predict(model_ranger_auto, newdata = data_test %>% select(-Retention), type = "prob") 
+colAUC(ranger_class_probs, data_test$Retention, plotROC = TRUE)
+```
+```{r}
+ctrl_classification <- trainControl(
+  method = "cv", # Used for configuring resampling method: in this case cross validation 
+  number = 10, # Instruct that it is 5 fold-cv
+  index = myFolds, # Folds' indexes
+  verboseIter = TRUE, # Print output of each step
+  savePredictions = TRUE, 
+  classProbs = TRUE)
+
+rf_model <- train(
+  x = data_x, 
+  y = data_y,
+  method = "ranger", 
+  trControl = ctrl_classification, 
+  tuneGrid = tune_grid, 
+  importance = "impurity",  # Variable importance calculation
+  num.trees = 500
+
+)
+```
+
+```{r}
+
+# Ensure proper column names for ranger compatibility
+colnames(data_train) <- make.names(colnames(data_train), unique = TRUE)
+
+# Extract resampling results (train accuracies)
+train_results <- rf_model$resample %>%
+  mutate(Fold = as.factor(row_number())) %>%
+  select(Fold, Accuracy)
+
+# Predict and evaluate accuracy per fold on test sets
+fold_accuracies <- lapply(seq_along(myFolds), function(i) {
+  # Train data for this fold
+  fold_train <- data_train[myFolds[[i]], ]
+  fold_test <- data_train[-myFolds[[i]], ]
+  
+  # Train model
+  fold_rf <- ranger(
+    Retention ~ ., 
+    data = fold_train,
+    mtry = tune_grid$mtry,
+    min.node.size = tune_grid$min.node.size,
+    splitrule = "gini",
+    num.trees = 500
+  )
+  
+  # Predictions
+  preds <- predict(fold_rf, fold_test)$predictions
+  acc <- mean(preds == fold_test$Retention)
+  return(data.frame(Fold = factor(i), Test_Accuracy = acc))
+}) %>% bind_rows()
+
+# Combine training and test accuracies
+accuracy_df <- train_results %>%
+  left_join(fold_accuracies, by = "Fold") %>%
+  pivot_longer(cols = c(Accuracy, Test_Accuracy), 
+               names_to = "Dataset", values_to = "Accuracy")
+
+# Plot accuracies for each fold
+accuracy_plot <- ggplot(accuracy_df, aes(x = Fold, y = Accuracy, color = Dataset, group = Dataset)) +
+  geom_point(size = 3) +
+  geom_line(linewidth = 1) +
+  scale_y_continuous(limits = c(0,1), labels = scales::percent) +
+  labs(title = "Train and Test Accuracy per Fold",
+       x = "Fold",
+       y = "Accuracy",
+       color = "Dataset") +
+  theme_minimal(base_size = 15)
+
+# Display the plot
+print(accuracy_plot)
+
+```
+
+```{r}
+ggplot(df, aes(x = Retention)) + 
+  geom_bar() + 
+  facet_wrap(~ Museum)
+```
+```{r}
+mus_per <- df %>%
+  group_by(Museum) %>%
+  summarise(  
+    percenting_returning = round(sum(Retention == "Returning") / n() * 100),  # Calculate % Returning
+    .groups = "drop"
+  )
+
+mus_per
+```
+
+```{r}
+ni <- df %>%
+  filter(`Visitor home location` == "Northern Ireland") %>%
+  filter(`MDM - Quintiles` != "NA")
+
+ggplot(ni, aes(x = `Are you aware that National Museums NI has a Membership scheme?`, fill = Retention)) +
+  geom_bar(position = "dodge") +  # Bars side by side
+  #facet_wrap(~ `Are you aware that National Museums NI has a Membership scheme?` ) +  # Separate plots for Retention categories
+  theme_minimal() +  # Cleaner theme
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5),  # Rotate x-axis labels
+    legend.position = "bottom"  # Move legend for better clarity
+  ) +
+  labs(
+    title = "Visitor Retention by Membership Awareness",  # Corrected title
+    x = "Membership Awareness",  # Adjusted x-axis label for clarity
+    y = "Visitor Count",
+    fill = "Retention Status"  # Adjusted legend title for clarity
+  )
+
+ggplot(ni, aes(x = `Are you aware that National Museums NI has a Membership scheme?`, fill = `MDM - Quintiles`)) +
+  geom_bar(position = "dodge") +  
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.5, "cm"),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  guides(fill = guide_legend(nrow = 2)) +  # Split legend into 2 rows
+  labs(
+    title = "Membership Awareness by MDM - Quintile",
+    x = "Membership Awareness",
+    y = "Visitor Count",
+    fill = "MDM - Quintile"
+  )
+
+ggplot(ni, aes(x = `Are you aware that National Museums NI has a Membership scheme?`, fill = `Age Range`)) +
+  geom_bar(position = "dodge") +  # Bars side by side
+  #facet_wrap(~ `Are you aware that National Museums NI has a Membership scheme?` ) +  # Separate plots for Retention categories
+  theme_minimal() +  # Cleaner theme
+  scale_fill_brewer(palette = "Set2") +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5),  # Rotate x-axis labels
+    legend.position = "bottom"  # Move legend for better clarity
+  ) +
+  labs(
+    title = "Membership Awareness by Age Range",  # Corrected title
+    x = "Membership Awareness",  # Adjusted x-axis label for clarity
+    y = "Visitor Count",
+    fill = "Age Range"  # Adjusted legend title for clarity
+  )
+```
+```{r}
+mem_percentage <- ni %>%
+  group_by(`Are you aware that National Museums NI has a Membership scheme?`, Retention) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(`Are you aware that National Museums NI has a Membership scheme?`) %>%
+  mutate(percentage = (count / sum(count)) * 100) %>%
+  summarise("percentage" = percentage)
+
+mem_percentage
+
+age_mem_percentage <- ni %>%
+  group_by(`Are you aware that National Museums NI has a Membership scheme?`, `Age Range`) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(`Age Range`) %>%
+  mutate(percentage = (count / sum(count)) * 100) %>%
+  summarise("percentage" = percentage)
+
+age_mem_percentage
+
+mdm_mem_percentage <- ni %>%
+  group_by(`Are you aware that National Museums NI has a Membership scheme?`, `MDM - Quintiles`) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(`MDM - Quintiles`) %>%
+  mutate(percentage = (count / sum(count)) * 100) %>%
+  summarise("percentage" = percentage)
+
+mdm_mem_percentage
+```
+
+
+```{r}
+df <- df %>%
+  filter(`Visitor home location` != "Declined")
+
+ggplot(df, aes(x = `Visitor home location`, fill = Retention)) +
+  geom_bar(position = "dodge") +  # Bars side by side
+  #facet_wrap(~ `Visitor home location`) +  # Separate plots for Retention categories
+  theme_minimal() +  # Cleaner theme
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 1),  # Rotate x-axis labels
+    legend.position = "bottom"  # Move legend for better clarity
+  ) +
+  labs(
+    title = "Visitor Retention by Home Location",
+    x = "Visitor Home Location",  # More relevant label for retention data
+    y = "Visitor Count",
+    fill = "Retention Status"  # Adjusted to match the legend's context
+  )
+```
+
+```{r}
+# Replace "Unknown" with NA
+df$`MDM - Quintiles`[df$`MDM - Quintiles` == "Unknown"] <- NA
+
+# Convert to factor and explicitly include NA values
+df$`MDM - Quintiles` <- factor(df$`MDM - Quintiles`, 
+                               levels = c("Q1 - Most Deprived", "Q2 - Deprived", "Q3 - Average", 
+                                          "Q4 - Less Deprived", "Q5 - Least Deprived"), 
+                               ordered = TRUE)
+
+# Use fct_explicit_na() to display NAs in ggplot
+df$`MDM - Quintiles` <- fct_explicit_na(df$`MDM - Quintiles`, na_level = "NA")
+
+# Create the bar plot
+ggplot(df, aes(x = `MDM - Quintiles`, fill = `MDM - Quintiles`)) +
+  geom_bar() + 
+  facet_wrap(~ Museum) +
+  scale_fill_brewer(palette = "Set2") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Bar Plot of MDM Quintiles by Museum", 
+    x = "MDM Quintiles", 
+    y = "Count"
+  ) 
+age_percentage <- df %>%
+  group_by(Museum, `Age Range`) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(Museum) %>%
+  mutate(percentage = (count / sum(count)) * 100) %>%
+  ungroup() %>%
+  group_by(`Age Range`) %>%
+  summarise(avg_percentage = mean(percentage))
+
+age_percentage
+```
+```{r}
+mdm_percentage <- df %>%
+  group_by(Museum, `MDM - Quintiles`) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(Museum) %>%
+  mutate(percentage = (count / sum(count)) * 100) %>%
+  ungroup() %>%
+  group_by(`MDM - Quintiles`) %>%
+  summarise(avg_percentage = mean(percentage))
+
+mdm_percentage
+```
+
