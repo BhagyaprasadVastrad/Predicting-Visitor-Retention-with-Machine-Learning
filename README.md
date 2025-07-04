@@ -37,6 +37,14 @@ This project presents a **machine learning approach to predicting and improving 
 
 ---
 
+## Insights 
+![Age by museum](https://github.com/user-attachments/assets/c1b3d42e-87ea-4a49-9ac5-47c02ba8919a)
+![mdm vs museum](https://github.com/user-attachments/assets/52765081-7d3d-4689-a40a-11881d002b33)
+![retention by home loction](https://github.com/user-attachments/assets/acd5a322-e8bb-4d82-80dc-809910f6a97e)
+![retention by membership](https://github.com/user-attachments/assets/8db179a8-101b-4f4a-b13d-0f1d39d37b52)
+![Visitor Parties by museum](https://github.com/user-attachments/assets/e3216a08-8012-4d12-ae56-f40c072dd660)
+
+
 ## Predictive Modelling
 
 | Metric        | Decision Tree | Random Forest |
