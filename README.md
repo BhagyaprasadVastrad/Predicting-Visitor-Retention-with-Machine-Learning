@@ -9,7 +9,7 @@ This project presents a **machine learning approach to predicting and improving 
 
 ## Author
 
-**Bhagyaprasad (MSc Data Analytics)**
+**Bhagyaprasad (Postgrad Data Analytics)**
 
 ---
 
