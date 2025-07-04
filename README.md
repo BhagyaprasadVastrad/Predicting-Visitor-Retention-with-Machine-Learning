@@ -1,5 +1,3 @@
-# Predicting-Visitor-Retention-with-Machine-Learning
-
 # Museum Visitor Retention Analysis
 
 ## Project Overview
