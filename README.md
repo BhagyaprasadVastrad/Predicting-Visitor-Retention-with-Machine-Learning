@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-This project presents a **machine learning approach to predicting and improving visitor retention** for museums. The analysis was conducted as part of *Analytathon 1* to identify key behavioural and demographic factors influencing visitor loyalty and to provide data-driven recommendations for boosting engagement.
+This project presents a **machine learning approach to predicting and improving visitor retention** for museums. The analysis was done to identify key behavioural and demographic factors influencing visitor loyalty and to provide data-driven recommendations for boosting engagement.
 
 
 ## Author
